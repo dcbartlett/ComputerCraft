@@ -1,0 +1,293 @@
+-- OpenPeripheral terminal glasses demo
+-- by boq
+
+local p = peripheral.wrap("back")
+
+if p == nil then
+    print("Peripheral not found")
+    return
+end
+
+p.clear()
+
+-- helper function and constants
+function pack(...)
+    return {...}
+end
+
+FORMAT_CHAR = "\194\167"
+FORMAT_BOLD = FORMAT_CHAR .. 'l'
+
+-- NOTE
+-- this program works with multiple users (i.e. multiple players attached to same terminal) so it may be more complicated then single user variant
+-- if it's not needed, programs may as well operate only on global surface
+local players = {}
+
+local attachedCount = 0
+local capturedCount = 0
+
+-- initialize global display surface
+local labelPlayers = p.addText(-1, 0, "Player count: 0/0");
+labelPlayers.setScreenAnchor("right", "top") -- screen origin (0,0) for this object will be in top right corner
+labelPlayers.setObjectAnchor("right", "bottom") -- "center" of object will be on bottom right corner
+labelPlayers.setRotation(-90) -- object will be rotated by 90 degrees counter-clockwise around object anchor (bottom right corner)
+
+local function initializePlayer(name, uuid)
+    local playerData = { name = name, uuid = uuid}
+
+    -- now we can use private surface, visible only to owner player
+    playerData.surface = p.getSurfaceByUUID(playerData.uuid)
+    labelPlayer = playerData.surface.addText(0, 0, "Hello " .. playerData.name)
+    labelPlayer.setAlignment("middle","top") -- identical as 'labelPlayer.setScreenAnchor("middle","top") labelPlayer.setObjectAnchor("middle","top")'
+
+    -- Minecraft color codes are interpreted (http://minecraft.gamepedia.com/Formatting_codes) - but since Lua does not support Unicode, you need to use "\194\167" instead of "\x00A7"
+    playerData.labelWaiting = playerData.surface.addText(0, 0, FORMAT_BOLD .. "CAPTURE MODE: OFF", 0xFF0000)
+    playerData.labelWaiting.setAlignment("right", "bottom")
+
+    -- add to global list
+    -- general hint: it's always safer to use UUID instead of names!
+    players[playerData.uuid] = playerData
+end
+
+local function changeCounter(deltaAttached, deltaCaptured)
+    attachedCount = attachedCount + deltaAttached
+    capturedCount = capturedCount + deltaCaptured
+    labelPlayers.setText("Player count: " .. attachedCount .. "/" .. capturedCount)
+end
+
+-- initialize already attached players
+for _, user in pairs(p.getUsers()) do
+    initializePlayer(user.name, user.uuid)
+    changeCounter(1, 0)
+end
+
+local timerCallbacks = {}
+
+p.sync() -- this operation is needed to make changes visible to player
+-- classic event loop
+while true do
+    evt = pack(os.pullEvent())
+    -- full list of glasses events: https://gist.github.com/boq/9a098b89ee102cbf1b2b
+    print(evt[1])
+    --  easy break condition - it's just ComputerCraft event
+    if evt[1] == "key" then
+        break -- exit loop
+    -- player started wearing glasses
+    elseif evt[1] == "glasses_attach" then
+        local name = evt[3]
+        local uuid = evt[4]
+        initializePlayer(name, uuid)
+        changeCounter(1, 0)
+    -- player logged out or took off glasses
+    elseif evt[1] == "glasses_detach" then
+        -- components on private surface are automatically cleared when player removes glasses
+        local playerUuid = evt[4]
+        players[playerUuid] = nil
+        changeCounter(-1,0)
+    -- player used wireless keyboard - computer will now start getting keyboard and mouse events
+    elseif evt[1] == "glasses_capture" then
+        changeCounter(0, 1)
+        local playerUuid = evt[4]
+        local playerData = players[playerUuid]
+
+        if playerData then
+            local surface = playerData.surface
+            playerData.labelWaiting.setText(FORMAT_BOLD .. "CAPTURE MODE: ON")
+            playerData.labelWaiting.setColor(0x00FF00)
+
+            -- middle boxes - will be used as bottons and to present click position
+            local function createBox(color)
+                local box = surface.addBox(0,0, 25, 25, color)
+                box.setScreenAnchor("middle","middle")
+                box.setUserdata(color) -- userdata is variable that can be used to store anything (no type or content restrictions, except for functions). It's also not synchronized to clients
+                return box
+            end
+
+            createBox(0xFF0000).setObjectAnchor("left", "top")
+            createBox(0x00FF00).setObjectAnchor("right", "top")
+            createBox(0x0000FF).setObjectAnchor("right", "bottom")
+            createBox(0xFFFFFF).setObjectAnchor("left", "bottom")
+
+            -- horizontal progress bar
+            surface.addBox(0,20, 100, 5, 0x000000).setAlignment("middle","top")
+
+            -- vertical progress bar
+            surface.addBox(0,0, 5, 100, 0x000000).setAlignment("right","middle")
+
+            playerData.horizontalMarker = surface.addBox(0, 20, 5, 5, 0xFFFFFF)
+            playerData.horizontalMarker.setAlignment("middle","top")
+
+            playerData.verticalMarker = surface.addBox(0, 0, 5, 5, 0xFFFFFF)
+            playerData.verticalMarker.setAlignment("right","middle")
+
+            -- pseudo-console stuff
+            playerData.textInput = surface.addText(0,0,">", 0x00FF00)
+            playerData.textInput.setScreenAnchor("left", "middle")
+            playerData.textInput.setObjectAnchor("left", "bottom")
+
+            playerData.textOutput = surface.addText(0,0,"", 0x0000FF)
+            playerData.textOutput.setScreenAnchor("left", "middle")
+            playerData.textOutput.setObjectAnchor("left", "top")
+            playerData.textOutput.setVisible(false)
+
+            -- mouse button indicator
+            surface.addBox(10, 10, 19, 9, 0xAAAAAA).setObjectAnchor("middle","top") -- button indicator background
+
+            playerData.mouseButtons = {}
+
+            local function createMouseButton(deltaX)
+                local button = surface.addBox(10 + deltaX, 12, 5, 5, 0xFF0000)
+                button.setZ(5) -- move it over box (default Z == 0)
+                button.setVisible(false)
+                button.setObjectAnchor("middle","top")
+                return button
+            end
+
+            -- mouse and keyboard codes are same as LWJGL, see http://minecraft.gamepedia.com/Key_codes
+
+            playerData.mouseButtons[0] = createMouseButton(-5) -- left button
+            playerData.mouseButtons[1] = createMouseButton(5) -- right button
+            playerData.mouseButtons[2] = createMouseButton(0) -- middle button
+        end
+    -- player exited from keyboard GUI
+    elseif evt[1] == "glasses_release" then
+        changeCounter(0, -1)
+        local playerUuid = evt[4]
+        local playerData = players[playerUuid]
+
+        if playerData then
+            -- recreate display to initial state
+            playerData.surface.clear()
+            initializePlayer(playerData.name, playerData.uuid)
+        end
+    -- player pressed mouse button anywhere in GUI
+    elseif evt[1] == "glasses_mouse_down" then
+        local playerUuid = evt[4]
+        local playerData = players[playerUuid]
+
+        if playerData then
+            local buttonId = evt[5]
+            -- changing visibility is faster than recreating and removing element every time
+            local button = playerData.mouseButtons[buttonId]
+            if button then
+                button.setVisible(true)
+            end
+        end
+    -- player released mouse button anywhere in GUI
+    elseif evt[1] == "glasses_mouse_up" then
+        local playerUuid = evt[4]
+        local playerData = players[playerUuid]
+
+        local buttonId = evt[5]
+
+        if playerData then
+            button = playerData.mouseButtons[buttonId]
+            if button then
+                button.setVisible(false)
+            end
+        end
+
+    -- player clicked on component (if you got this event, then you won't get glasses_mouse_down. Same for glasses_component_mouse_up and glasses_mouse_up)
+    elseif evt[1] == "glasses_component_mouse_down" then
+        local isPrivate = evt[6]
+        if isPrivate then
+            local playerUuid = evt[4]
+            local playerData = players[playerUuid]
+
+            if playerData then
+                local objectId = evt[5]
+                local component = playerData.surface.getObjectById(objectId)
+                local userdata = component.getUserdata()
+                if userdata then -- only rectangles in middle have that value filled
+                    -- capture control is special object used to control few properties of keyboard GUI
+                    local capture = p.getCaptureControl(playerUuid)
+                    capture.setBackground(userdata)
+                    playerData.horizontalMarker.setColor(userdata)
+                    playerData.verticalMarker.setColor(userdata)
+                end
+
+                -- click position is given in pixels from top left component corner
+                local clickX = evt[7]
+                local clickY = evt[8]
+
+                -- -0.5, since anchor is in middle of screen
+                playerData.horizontalMarker.setX((clickX / 25.0 - 0.5) * 100)
+                playerData.verticalMarker.setY((clickY / 25.0 - 0.5) * 100)
+            end
+        end
+    elseif evt[1] == "glasses_key_down" then
+        local playerUuid = evt[4]
+        local playerData = players[playerUuid]
+
+        if playerData then
+            local code = evt[5] -- control code, see http://minecraft.gamepedia.com/Key_codes for keymap
+            local char = evt[6] -- may be 0 for some control characters
+
+            local input = playerData.textInput
+            local contents = input.getText()
+            if code == 14 then -- backspace
+                if contents:len() > 1 then
+                    input.setText(contents:sub(0, -2))
+                end
+            elseif code == 28 then -- enter
+                input.setText(">")
+
+                local function setOutput(text, color)
+                    playerData.textOutput.setText(text)
+                    playerData.textOutput.setColor(color)
+                    playerData.textOutput.setVisible(true)
+                    local timerId = os.startTimer(1)
+                    timerCallbacks[timerId] = function ()
+                        playerData.textOutput.setVisible(false)
+                    end
+                end
+
+                -- alternative to writing tons of ifs. Normally would be initialized once before main loop, but this is demo/semi-tutorial
+                local commands = {}
+
+                function commands.hello(playerData)
+                    setOutput("Hi!", 0xFFFF00)
+                end
+
+                function commands.exit(playerData)
+                    -- manually exit keyboard GUI. Player can do it itself by using escape button (same as normal Minecraft GUIs)
+                    p.getCaptureControl(playerData.uuid).stopCapturing()
+                end
+
+                -- sorry, couldn't resist
+                local function createColorCommand(color)
+                    return function(playerData)
+                        playerData.textInput.setColor(color)
+                        setOutput("OK", color)
+                    end
+                end
+
+                commands.red = createColorCommand(0xFF0000)
+                commands.green = createColorCommand(0x00FF00)
+                commands.blue = createColorCommand(0x0000FF)
+
+                command = contents:sub(2, -1)
+                commandSub = commands[command] -- skip console prompt
+
+                if commandSub then
+                    commandSub(playerData)
+                else
+                    setOutput("invalid command: " .. command, 0xFF0000)
+                end
+
+            elseif string.byte(char) >= 0x20 then -- skip unprintable control chars
+                input.setText(contents .. char)
+            end
+        end
+    elseif evt[1] == "timer" then
+        local timerId = evt[2]
+        callback = timerCallbacks[timerId]
+        if callback then callback() end
+        timerCallbacks[timerId] = nil
+    end
+
+    -- sync() shouldn't be called often
+    -- if called without changes, nothing will happen
+    -- this method is synchronized - i.e. it can be executed only once per game tick (1/20 s). Other instructions don't have that limit
+    p.sync()
+end
